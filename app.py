@@ -5,62 +5,62 @@ import json
 
 # --- 1. APP CONFIGURATION & STYLING ---
 st.set_page_config(
-    page_title="Serper.dev Intelligence Hub",
-    page_icon="🕵️‍♂️",
+    page_title="Serper.dev Ultimate Suite",
+    page_icon="🚀",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for cleaner cards and metrics
 st.markdown("""
 <style>
-    div[data-testid="stMetricValue"] { font-size: 24px; }
-    .result-card {
-        background-color: #1E1E1E;
-        padding: 15px;
-        border-radius: 8px;
-        margin-bottom: 10px;
-        border: 1px solid #333;
-    }
-    .price-tag {
-        background-color: #4CAF50;
-        color: white;
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-weight: bold;
-    }
+    .result-card { background-color: #262730; padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #444; }
+    .tag { background-color: #4CAF50; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; margin-right: 5px; }
+    .source-text { color: #aaa; font-size: 0.9em; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. BACKEND FUNCTIONS (OPTIMIZED) ---
+# --- 2. BACKEND LOGIC ---
 
-# @st.cache_data ensures we don't pay for the same search twice in one session
 @st.cache_data(show_spinner=False)
-def query_serper(api_key, query, search_type, location, gl, hl, num_results):
-    base_url = "https://google.serper.dev"
-    
-    endpoint_map = {
-        "Organic Search": "search",
-        "News": "news",
-        "Images": "images",
-        "Shopping": "shopping",
-        "Places (Maps)": "places",
-        "Patents": "patents"
-    }
-    
-    endpoint = endpoint_map.get(search_type, "search")
-    url = f"{base_url}/{endpoint}"
-    
+def query_serper(api_key, query_term, search_type, location, gl, hl, num_results, page_token=None):
+    # 1. Determine Host and Endpoint
+    if search_type == "Webpage Scraper":
+        base_url = "https://scrape.serper.dev"
+        endpoint = "" # Root endpoint
+    else:
+        base_url = "https://google.serper.dev"
+        endpoint_map = {
+            "Search": "search", "News": "news", "Videos": "videos",
+            "Images": "images", "Shopping": "shopping", "Places": "places",
+            "Maps": "maps", "Scholar": "scholar", "Patents": "patents",
+            "Autocomplete": "autocomplete", "Lens (Reverse Image)": "lens",
+            "Reviews": "reviews"
+        }
+        endpoint = endpoint_map.get(search_type, "search")
+
+    url = f"{base_url}/{endpoint}" if endpoint else base_url
+
+    # 2. Construct Payload based on Type
     payload = {
-        "q": query,
         "gl": gl,
-        "hl": hl,
-        "num": num_results
+        "hl": hl
     }
     
-    # Only add location if it's specific
-    if location and location != "Auto":
-        payload["location"] = location
+    # Special Handling for inputs
+    if search_type in ["Webpage Scraper", "Lens (Reverse Image)"]:
+        payload["url"] = query_term
+    elif search_type == "Reviews":
+        # For reviews, we treat the input as a Place ID or CID
+        # Heuristic: If it starts with 'Ch', it's likely a PlaceID
+        if query_term.startswith("Ch"): 
+            payload["placeId"] = query_term
+        else:
+            payload["cid"] = query_term # Fallback
+    else:
+        payload["q"] = query_term
+        payload["num"] = num_results
+        if location and location != "Auto":
+            payload["location"] = location
 
     headers = {
         'X-API-KEY': api_key,
@@ -69,153 +69,182 @@ def query_serper(api_key, query, search_type, location, gl, hl, num_results):
 
     try:
         response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status() # Raise error for bad status codes
+        response.raise_for_status()
         return response.json()
-    except requests.exceptions.HTTPError as err:
-        if response.status_code == 401:
-            return {"error": "⛔ Unauthorized: Invalid API Key"}
-        if response.status_code == 403:
-            return {"error": "⛔ Forbidden: API Key invalid or out of credits"}
-        return {"error": f"API Error: {err}"}
     except Exception as e:
-        return {"error": f"Connection Error: {e}"}
+        return {"error": str(e)}
 
-def clean_dataframe(df):
-    """Cleans up columns for the Analyst View"""
-    # Drop useless columns that clutter the view
-    drop_cols = ['position', 'sitelinks', 'snippetHighlighted']
-    for col in drop_cols:
-        if col in df.columns:
-            df = df.drop(columns=[col])
-    return df
+def safe_normalize(data, key):
+    """Safely extracts a list from JSON and converts to DataFrame"""
+    if key in data and isinstance(data[key], list):
+        return pd.json_normalize(data[key])
+    return pd.DataFrame()
 
 # --- 3. UI LAYOUT ---
 
-# Sidebar
 with st.sidebar:
-    st.header("🕵️‍♂️ Control Panel")
+    st.header("🎛️ Serper Control")
     
-    # API Key Management
     if "serper_api_key" not in st.session_state:
         st.session_state.serper_api_key = ""
     
-    api_key = st.text_input("Serper API Key", type="password", value=st.session_state.serper_api_key, help="Get key at serper.dev")
-    if api_key:
-        st.session_state.serper_api_key = api_key
+    api_key = st.text_input("API Key", type="password", value=st.session_state.serper_api_key)
+    if api_key: st.session_state.serper_api_key = api_key
 
     st.divider()
     
-    # Search Parameters
-    st.subheader("🌍 Geography & Language")
-    geo_mode = st.radio("Location Mode", ["Quick Select", "Advanced Custom"], horizontal=True)
+    # Grouped Verticals
+    category = st.selectbox("Category", ["Standard Search", "Media", "Geo & Local", "Academic", "Tools"])
     
-    location_str = "Auto"
-    gl = "us"
-    hl = "en"
-    
-    if geo_mode == "Quick Select":
-        c_map = {"🇺🇸 United States": "us", "🇬🇧 United Kingdom": "gb", "🇩🇪 Germany": "de", "🇨🇦 Canada": "ca", "🇫🇷 France": "fr"}
-        sel_c = st.selectbox("Country", list(c_map.keys()))
-        gl = c_map[sel_c]
+    if category == "Standard Search":
+        search_type = st.radio("Type", ["Search", "News", "Shopping", "Autocomplete"])
+    elif category == "Media":
+        search_type = st.radio("Type", ["Images", "Videos", "Lens (Reverse Image)"])
+    elif category == "Geo & Local":
+        search_type = st.radio("Type", ["Places", "Maps", "Reviews"])
+    elif category == "Academic":
+        search_type = st.radio("Type", ["Scholar", "Patents"])
     else:
-        location_str = st.text_input("City/Region", placeholder="e.g. Manhattan, NY")
-        col_g1, col_g2 = st.columns(2)
-        gl = col_g1.text_input("Country Code", "us", max_chars=2, help="2-letter code (e.g. 'us')")
-        hl = col_g2.text_input("Lang Code", "en", max_chars=2, help="2-letter code (e.g. 'en')")
+        search_type = st.radio("Type", ["Webpage Scraper"])
 
     st.divider()
-    num_results = st.slider("Max Results", 10, 100, 20)
-
-# Main Area
-st.title("Serper Intelligence Hub")
-st.caption("Top 1% Engineering Implementation • v2.0 Optimized")
-
-col_search, col_type = st.columns([3, 1])
-with col_search:
-    query = st.text_input("Search Query", placeholder="What are you looking for?", key="query_input")
-with col_type:
-    search_type = st.selectbox("Vertical", ["Organic Search", "News", "Places (Maps)", "Images", "Shopping"])
-
-# Action
-if st.button("🔍 Execute Search", type="primary"):
-    if not api_key:
-        st.warning("⚠️ Please enter your API Key in the sidebar.")
-    elif not query:
-        st.warning("⚠️ Please enter a query.")
+    
+    # Dynamic Location Controls (Only show if relevant)
+    if search_type not in ["Webpage Scraper", "Lens (Reverse Image)", "Reviews"]:
+        st.subheader("🌍 Locale")
+        gl = st.text_input("Country (gl)", "us", max_chars=2)
+        hl = st.text_input("Language (hl)", "en", max_chars=2)
+        location = st.text_input("Specific Location", placeholder="e.g. New York, NY")
     else:
-        with st.spinner(f"Querying Google {search_type} via Serper..."):
-            data = query_serper(api_key, query, search_type, location_str, gl, hl, num_results)
+        gl, hl, location = "us", "en", "Auto"
+
+    num = st.slider("Results", 10, 100, 20)
+
+# --- 4. MAIN SCREEN ---
+
+st.title(f"🔭 Serper: {search_type}")
+
+# Dynamic Input Label
+input_label_map = {
+    "Webpage Scraper": "Enter URL to Scrape",
+    "Lens (Reverse Image)": "Enter Image URL",
+    "Reviews": "Enter Place ID (starts with 'Ch...') or CID",
+    "Maps": "Search Query or Lat,Long"
+}
+input_label = input_label_map.get(search_type, "Search Query")
+placeholder_text = "Enter URL..." if "URL" in input_label else "Type here..."
+
+col1, col2 = st.columns([4, 1])
+with col1:
+    query_input = st.text_input(input_label, placeholder=placeholder_text)
+with col2:
+    run_btn = st.button("🚀 Run", type="primary", use_container_width=True)
+
+if run_btn and query_input and api_key:
+    with st.spinner("Connecting to Google Serper API..."):
+        data = query_serper(api_key, query_input, search_type, location, gl, hl, num)
+        
+        if "error" in data:
+            st.error(f"API Error: {data['error']}")
+        else:
+            # --- RESULT PARSERS ---
             
-            if "error" in data:
-                st.error(data["error"])
-            else:
-                # Determine result key
-                res_key_map = {
-                    "Organic Search": "organic", "News": "news", 
-                    "Places (Maps)": "places", "Images": "images", "Shopping": "shopping"
-                }
-                target_key = res_key_map[search_type]
-                results = data.get(target_key, [])
+            # 1. VISUALS (Images / Lens)
+            if search_type in ["Images", "Lens (Reverse Image)"]:
+                key = "images" if search_type == "Images" else "images"
+                df = safe_normalize(data, key)
+                if not df.empty:
+                    st.success(f"Found {len(df)} images.")
+                    cols = st.columns(4)
+                    for i, row in df.iterrows():
+                        with cols[i%4]:
+                            img = row.get('imageUrl') or row.get('thumbnailUrl')
+                            if img: st.image(img, use_container_width=True)
+                            st.caption(f"[{row.get('title', 'Link')}]({row.get('link', '#')})")
+            
+            # 2. VIDEOS
+            elif search_type == "Videos":
+                df = safe_normalize(data, "videos")
+                for i, row in df.iterrows():
+                    with st.container():
+                        c1, c2 = st.columns([1, 3])
+                        with c1:
+                            if 'imageUrl' in row: st.image(row['imageUrl'], use_container_width=True)
+                        with c2:
+                            st.markdown(f"### [{row.get('title')}]({row.get('link')})")
+                            st.caption(f"{row.get('channel', '')} • {row.get('date', '')}")
+                            st.write(row.get('snippet', ''))
+
+            # 3. SHOPPING
+            elif search_type == "Shopping":
+                df = safe_normalize(data, "shopping")
+                cols = st.columns(4)
+                for i, row in df.iterrows():
+                    with cols[i%4]:
+                        if 'imageUrl' in row: st.image(row['imageUrl'], use_container_width=True)
+                        st.markdown(f"**{row.get('price', '')}**")
+                        st.markdown(f"[{row.get('title')}]({row.get('link')})")
+                        st.caption(row.get('source', ''))
+
+            # 4. PLACES / MAPS
+            elif search_type in ["Places", "Maps"]:
+                key = "places"
+                df = safe_normalize(data, key)
+                if not df.empty:
+                    # Try to map it
+                    if 'latitude' in df.columns:
+                        st.map(df.rename(columns={'latitude': 'lat', 'longitude': 'lon'})[['lat', 'lon']].dropna())
+                    
+                    st.dataframe(df[['title', 'address', 'rating', 'ratingCount', 'category']], use_container_width=True)
+
+            # 5. ACADEMIC (Scholar / Patents)
+            elif search_type in ["Scholar", "Patents"]:
+                key = "organic" # Serper often returns these under 'organic' or specific keys
+                if search_type == "Patents" and "organic" not in data: key = "patents" # fallback
                 
-                if not results:
-                    st.warning(f"No results found for '{query}'")
-                else:
-                    # Metrics
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("Total Results", len(results))
-                    if "searchParameters" in data:
-                        m2.metric("Location Used", data["searchParameters"].get("gl", "N/A").upper())
-                        m3.metric("Language", data["searchParameters"].get("hl", "N/A").upper())
+                results = data.get(key, [])
+                for res in results:
+                    st.markdown(f"### [{res.get('title')}]({res.get('link')})")
+                    st.markdown(f"<span class='tag'>{res.get('publication_info', {}).get('summary', '')}</span>", unsafe_allow_html=True)
+                    st.write(res.get('snippet', ''))
                     st.divider()
 
-                    # Parse to DF
-                    df = pd.json_normalize(results)
-                    
-                    # --- VIEW LOGIC BASED ON TYPE ---
-                    
-                    # 1. PLACES VIEW (Map + List)
-                    if search_type == "Places (Maps)":
-                        # Map Logic: Streamlit requires 'lat' and 'lon' columns
-                        if 'latitude' in df.columns and 'longitude' in df.columns:
-                            map_df = df.rename(columns={'latitude': 'lat', 'longitude': 'lon'})
-                            st.map(map_df[['lat', 'lon']].dropna())
-                        
-                        st.subheader("📍 Locations Found")
-                        for i, row in df.iterrows():
-                            with st.expander(f"{i+1}. {row.get('title', 'Unknown')}"):
-                                st.write(f"**Address:** {row.get('address', 'N/A')}")
-                                st.write(f"**Rating:** ⭐ {row.get('rating', 'N/A')} ({row.get('ratingCount', 0)} reviews)")
-                    
-                    # 2. IMAGES / SHOPPING VIEW (Grid)
-                    elif search_type in ["Images", "Shopping"]:
-                        cols = st.columns(4) # 4 Column Grid
-                        for i, row in df.iterrows():
-                            with cols[i % 4]:
-                                # Show Image
-                                img_url = row.get('imageUrl') or row.get('thumbnailUrl')
-                                if img_url:
-                                    st.image(img_url, use_container_width=True)
-                                
-                                # Show Title/Price
-                                if search_type == "Shopping":
-                                    price = row.get('price', '')
-                                    st.markdown(f"<span class='price-tag'>{price}</span>", unsafe_allow_html=True)
-                                    st.caption(row.get('source', ''))
-                                
-                                st.markdown(f"[{row.get('title', 'Link')}]({row.get('link', '#')})")
+            # 6. SCRAPER / WEBPAGE
+            elif search_type == "Webpage Scraper":
+                st.subheader("📄 Scraped Content")
+                st.code(data.get("text", "No text content found."), language="text")
+                with st.expander("View HTML Source"):
+                    st.code(data.get("html", "")[:2000] + "...", language="html")
+            
+            # 7. AUTOCOMPLETE
+            elif search_type == "Autocomplete":
+                st.subheader("Suggestions")
+                suggs = data.get("suggestions", [])
+                for s in suggs:
+                    st.write(f"👉 {s.get('value')}")
 
-                    # 3. DEFAULT LIST VIEW (Search, News)
-                    else:
-                        for i, row in df.iterrows():
-                            st.markdown(f"### [{row.get('title', 'No Title')}]({row.get('link', '#')})")
-                            st.caption(f"{row.get('source', '')} • {row.get('date', '')}")
-                            if 'snippet' in row:
-                                st.write(row['snippet'])
-                            st.divider()
+            # 8. REVIEWS
+            elif search_type == "Reviews":
+                reviews = data.get("reviews", [])
+                for r in reviews:
+                    st.markdown(f"**{r.get('author', 'User')}** {r.get('stars', '')}⭐")
+                    st.info(r.get('text', ''))
+                    st.caption(r.get('date', ''))
 
-                    # RAW DATA EXPANDER
-                    with st.expander("📊 View Raw Data (Analyst Mode)"):
-                        clean_df = clean_dataframe(df)
-                        st.dataframe(clean_df)
-                        csv = clean_df.to_csv(index=False).encode('utf-8')
-                        st.download_button("📥 Download CSV", csv, "results.csv", "text/csv")
+            # DEFAULT (News, Search)
+            else:
+                key = "news" if search_type == "News" else "organic"
+                df = safe_normalize(data, key)
+                if not df.empty:
+                    for i, row in df.iterrows():
+                        st.markdown(f"### [{row.get('title')}]({row.get('link')})")
+                        st.caption(f"{row.get('source', '')} • {row.get('date', '')}")
+                        st.write(row.get('snippet', ''))
+                        st.divider()
+            
+            # RAW DATA DUMP (Always available)
+            with st.expander("🔍 View Raw JSON Response"):
+                st.json(data)
+
+elif run_btn and not api_key:
+    st.warning("Please enter your API Key in the sidebar.")
